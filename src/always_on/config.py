@@ -179,6 +179,54 @@ class Settings(BaseSettings):
         default=Path("data/vercel_watcher_state.json")
     )
 
+    # --- 2-Way Discord Bot Bridge ---
+    enable_discord_bot: bool = Field(
+        default=False,
+        description="Run the 2-way Discord bot gateway inside `always-on run`",
+    )
+    discord_bot_token: str = Field(default="")
+    discord_allowed_user_ids: str = Field(
+        default="",
+        description="Comma-separated numeric Discord user IDs allowed to talk to the bot (fail-closed if empty)",
+    )
+    discord_notify_channel_id: str = Field(
+        default="",
+        description="Numeric Discord channel ID for proactive alerts and direct chat without @mention",
+    )
+    discord_passive_channel_ids: str = Field(
+        default="",
+        description="Optional comma-separated channel IDs ingested at priority=normal via local salience gating",
+    )
+    discord_quiet_hours: str = Field(
+        default="",
+        description="Optional local HH:MM-HH:MM window suppressing non-critical proactive Discord alerts (e.g. 22:00-08:00)",
+    )
+    discord_guild_id: str = Field(
+        default="",
+        description="Optional numeric server/guild ID for instant slash command sync",
+    )
+
+    # --- MCP Client Support (External Tool Servers) ---
+    enable_mcp: bool = Field(
+        default=True,
+        description="Enable MCP client connections from mcp_config_path or mcp_servers_json",
+    )
+    mcp_config_path: Path = Field(
+        default=Path("mcp_servers.json"),
+        description="Path to Claude-Desktop-style mcpServers JSON config",
+    )
+    mcp_servers_json: str = Field(
+        default="",
+        description="Optional inline JSON string override for mcpServers",
+    )
+    mcp_startup_timeout_seconds: float = Field(default=45.0, gt=1.0, le=120.0)
+    mcp_tool_timeout_seconds: float = Field(default=30.0, gt=1.0, le=300.0)
+    mcp_max_result_chars: int = Field(default=8000, ge=500, le=32000)
+    allow_mcp_on_background: bool = Field(
+        default=False,
+        description="If false, restrict MCP tools to direct user chat wake-ups unless a server sets allow_on_background=true",
+    )
+
     def calculate_cost_usd(
         self,
         *,

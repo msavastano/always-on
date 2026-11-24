@@ -10,6 +10,7 @@ from typing import Any
 from always_on.config import Settings
 from always_on.db.store import AgentStore
 from always_on.safety.circuit_breaker import AgentCircuitBreaker
+from always_on.tools.mcp_client import MCPClientManager
 from always_on.tools.web_search import (
     WebSearchProvider,
     WebSearchService,
@@ -42,10 +43,11 @@ class ToolRegistry:
         settings: Settings | None = None,
         circuit_breaker: AgentCircuitBreaker | None = None,
         web_search_provider: WebSearchProvider | None = None,
+        mcp_manager: MCPClientManager | None = None,
     ) -> None:
         self.store = store
-        self.inbox_dir = inbox_dir
-        self.notes_dir = notes_dir
+        self.inbox_dir = inbox_dir.resolve()
+        self.notes_dir = notes_dir.resolve()
         self.settings = settings or Settings()
         self.circuit_breaker = circuit_breaker
         self.web_search_service: WebSearchService | None = (
@@ -59,8 +61,38 @@ class ToolRegistry:
             and self.settings.web_search_provider not in ("anthropic", "disabled")
             else None
         )
+        self.mcp_manager: MCPClientManager | None = (
+            mcp_manager
+            if mcp_manager is not None
+            else (MCPClientManager(self.settings) if self.settings.enable_mcp else None)
+        )
         self.inbox_dir.mkdir(parents=True, exist_ok=True)
         self.notes_dir.mkdir(parents=True, exist_ok=True)
+
+    async def start(self) -> dict[str, Any]:
+        """Connect configured external MCP servers (no-op if disabled or unconfigured)."""
+        if self.mcp_manager is None:
+            return self.mcp_status()
+        return await self.mcp_manager.start()
+
+    async def stop(self) -> None:
+        """Close external MCP server sessions cleanly."""
+        if self.mcp_manager is not None:
+            await self.mcp_manager.stop()
+
+    def mcp_status(self) -> dict[str, Any]:
+        """Return current MCP client connection and tool summary."""
+        if self.mcp_manager is None:
+            return {
+                "enabled": False,
+                "config_path": str(self.settings.mcp_config_path),
+                "config_error": None,
+                "server_count": 0,
+                "connected_count": 0,
+                "tool_count": 0,
+                "servers": {},
+            }
+        return self.mcp_manager.status()
 
     def tool_definitions(
         self,
@@ -249,6 +281,14 @@ class ToolRegistry:
                 }
             )
 
+        if self.mcp_manager is not None:
+            defs.extend(
+                self.mcp_manager.tool_definitions(
+                    event_source=event_source,
+                    default_allow_on_background=self.settings.allow_mcp_on_background,
+                )
+            )
+
         return defs
 
     async def execute(self, name: str, args: dict[str, Any]) -> tuple[str, bool]:
@@ -315,7 +355,7 @@ class ToolRegistry:
                 return json.dumps(
                     {
                         "status": "written",
-                        "filename": target.relative_to(self.notes_dir).as_posix(),
+                        "filename": target.relative_to(self.notes_dir.resolve()).as_posix(),
                         "bytes": len(content.encode("utf-8")),
                     }
                 ), False
@@ -365,6 +405,9 @@ class ToolRegistry:
                     max_chars=self.settings.fetch_webpage_max_chars,
                     timeout_seconds=self.settings.web_search_timeout_seconds,
                 )
+
+            if self.mcp_manager is not None and self.mcp_manager.has_tool(name):
+                return await self.mcp_manager.call_tool(name, args)
 
             return f"Error: unknown tool '{name}'.", True
         except Exception as exc:

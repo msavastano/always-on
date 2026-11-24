@@ -8,12 +8,14 @@ import logging
 import os
 import re
 from collections import deque
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 
 from always_on.cognitive.consolidation import sleep_and_consolidate
+from always_on.channels.discord_bot import DiscordBridge
 from always_on.cognitive.fatigue import compute_fatigue
 from always_on.cognitive.salience import compute_salience
 from always_on.config import Settings
@@ -103,6 +105,7 @@ class AlwaysOnDaemon:
         llm_client: HaikuClient | None = None,
         web_search_provider: WebSearchProvider | None = None,
         extra_sources: list[EventSource] | None = None,
+        mcp_manager: Any | None = None,
     ) -> None:
         self.settings = settings
         self.store = store or AgentStore(settings.db_path)
@@ -119,6 +122,7 @@ class AlwaysOnDaemon:
             settings=settings,
             circuit_breaker=self.circuit_breaker,
             web_search_provider=web_search_provider,
+            mcp_manager=mcp_manager,
         )
 
         # Built-in pluggable event sources
@@ -140,6 +144,10 @@ class AlwaysOnDaemon:
         self._loop_task: asyncio.Task[None] | None = None
         self._watcher_tasks: list[asyncio.Task[None]] = []
         self._watcher_status: dict[str, dict[str, Any]] = {}
+        self._discord_bridge: DiscordBridge | None = None
+        self._proactive_listeners: list[
+            Callable[[IncomingEvent, ChatReply], Awaitable[None]]
+        ] = []
         self._stop_event = asyncio.Event()
         self._shutting_down = False
         self._started = False
@@ -172,6 +180,11 @@ class AlwaysOnDaemon:
         self._shutting_down = False
         await self.store.connect()
 
+        # Hydrate persistent chat history (shared across Dashboard, CLI & Discord)
+        persisted_chat = await self.store.list_chat_messages(limit=100)
+        self.chat_history.clear()
+        self.chat_history.extend(persisted_chat)
+
         # Seed default priorities on first boot so Goal Relevance works immediately
         existing_priorities = await self.store.list_active_priorities()
         if not existing_priorities:
@@ -190,6 +203,33 @@ class AlwaysOnDaemon:
             summary=f"{self.settings.agent_name} daemon started (model={self.settings.anthropic_model}).",
         )
 
+        mcp_snap = await self.tools.start()
+        if mcp_snap.get("config_error"):
+            self._record_activity(
+                kind="mcp",
+                source="mcp",
+                summary=str(mcp_snap["config_error"]),
+                status="error",
+            )
+        elif mcp_snap.get("server_count", 0) > 0:
+            err_servers = [
+                name
+                for name, info in (mcp_snap.get("servers") or {}).items()
+                if info.get("status") == "error"
+            ]
+            summary = (
+                f"MCP ready: {mcp_snap['connected_count']}/{mcp_snap['server_count']} server(s), "
+                f"{mcp_snap['tool_count']} tool(s)"
+            )
+            if err_servers:
+                summary += f" (errors: {', '.join(err_servers)})"
+            self._record_activity(
+                kind="mcp",
+                source="mcp",
+                summary=summary,
+                status="error" if err_servers else "ok",
+            )
+
         if run_background_loop:
             self._loop_task = asyncio.create_task(self._outer_loop(), name="always-on-loop")
             if self.settings.enable_claude_code_watcher:
@@ -206,13 +246,20 @@ class AlwaysOnDaemon:
                         name="watcher-vercel",
                     )
                 )
+            if self.settings.enable_discord_bot:
+                self._discord_bridge = DiscordBridge(self, self.settings)
+                await self._discord_bridge.start()
 
     async def stop(self) -> None:
-        """Gracefully stop the outer event loop, watchers, sources, LLM client, and SQLite store."""
+        """Gracefully stop Discord, outer loop, watchers, MCP servers, sources, LLM client, and SQLite store."""
         if not self._started:
             return
         self._shutting_down = True
         self._stop_event.set()
+        if self._discord_bridge is not None:
+            with contextlib.suppress(Exception):
+                await self._discord_bridge.stop()
+            self._discord_bridge = None
         for task in self._watcher_tasks:
             task.cancel()
         if self._watcher_tasks:
@@ -231,6 +278,9 @@ class AlwaysOnDaemon:
         for src in self.sources:
             with contextlib.suppress(Exception):
                 await src.stop()
+
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(self.tools.stop(), timeout=3.5)
 
         with contextlib.suppress(Exception):
             await asyncio.wait_for(self.llm_client.close(), timeout=2.0)
@@ -472,18 +522,47 @@ class AlwaysOnDaemon:
         await self._broadcast_telemetry()
         return reply
 
-    async def send_chat(self, message: str, *, is_correction: bool = False) -> ChatReply:
+    def register_proactive_listener(
+        self, cb: Callable[[IncomingEvent, ChatReply], Awaitable[None]]
+    ) -> None:
+        """Register an async listener notified when background events wake the agent."""
+        self._proactive_listeners.append(cb)
+
+    async def _record_chat_entry(self, entry: dict[str, Any]) -> dict[str, Any]:
+        """Persist a chat entry to SQLite and append it to the live in-memory window."""
+        saved = await self.store.append_chat_message(entry)
+        self.chat_history.append(saved)
+        return saved
+
+    async def clear_chat_history(self) -> int:
+        """Clear persisted chat messages without affecting Core Memory or fast_buffer."""
+        self.chat_history.clear()
+        deleted = await self.store.clear_chat_messages()
+        await self._broadcast_telemetry()
+        return deleted
+
+    async def send_chat(
+        self,
+        message: str,
+        *,
+        is_correction: bool = False,
+        actor_id: str = "user",
+        source: str = "chat",
+    ) -> ChatReply:
         """Submit a direct user chat message through ChatSource and await the agent's reply."""
-        self.chat_history.append(
+        await self._record_chat_entry(
             {
                 "role": "user",
-                "actor_id": "user",
+                "actor_id": actor_id,
+                "source": source,
                 "content": message,
                 "is_correction": is_correction,
                 "timestamp": utc_now_iso(),
             }
         )
-        _, fut = self.chat_source.submit(message, actor_id="user", is_correction=is_correction)
+        _, fut = self.chat_source.submit(
+            message, actor_id=actor_id, is_correction=is_correction
+        )
         if self._loop_task is None:
             # If running synchronously without background loop (e.g. unit tests / one-shot CLI)
             await self.tick_once()
@@ -600,7 +679,7 @@ class AlwaysOnDaemon:
                     status="circuit_tripped",
                 )
                 if event.source == "chat":
-                    self._append_agent_chat(reply)
+                    await self._append_agent_chat(reply)
                 return reply
 
             core_memory = await self.store.list_core_memory()
@@ -864,17 +943,22 @@ class AlwaysOnDaemon:
                 usage=total_usage,
             )
             if event.source == "chat":
-                self._append_agent_chat(reply, source="chat", trigger_actor=event.actor_id)
+                await self._append_agent_chat(reply, source="chat", trigger_actor=event.actor_id)
             elif event.source in ("webhook", "file_watcher") and final_text:
-                self._append_agent_chat(
+                await self._append_agent_chat(
                     reply,
                     source=event.source,
                     trigger_actor=event.actor_id,
                     trigger_preview=event.content.splitlines()[0][:140],
                 )
+                for listener in list(self._proactive_listeners):
+                    try:
+                        await listener(event, reply)
+                    except Exception as exc:
+                        logger.warning("Proactive listener error: %s", exc)
             return reply
 
-    def _append_agent_chat(
+    async def _append_agent_chat(
         self,
         reply: ChatReply,
         *,
@@ -882,7 +966,7 @@ class AlwaysOnDaemon:
         trigger_actor: str = "user",
         trigger_preview: str | None = None,
     ) -> None:
-        self.chat_history.append(
+        await self._record_chat_entry(
             {
                 "role": "assistant",
                 "actor_id": reply.actor_id,
@@ -967,6 +1051,12 @@ class AlwaysOnDaemon:
             "activity_feed": [a.to_dict() for a in self.activity_feed],
             "chat_history": list(self.chat_history),
             "watchers": dict(self._watcher_status),
+            "discord": (
+                dict(self._discord_bridge.status)
+                if self._discord_bridge is not None
+                else {"enabled": False, "connected": False}
+            ),
+            "mcp": self.tools.mcp_status(),
         }
 
     async def _broadcast_telemetry(self) -> None:

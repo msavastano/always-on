@@ -147,6 +147,11 @@ def create_app(
         )
         return reply.model_dump()
 
+    @app.delete("/api/chat")
+    async def delete_chat() -> dict[str, Any]:
+        cleared = await agent_daemon.clear_chat_history()
+        return {"cleared": cleared}
+
     @app.post("/api/events/webhook")
     async def post_webhook(
         req: WebhookRequest,

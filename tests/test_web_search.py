@@ -6,7 +6,7 @@ import asyncio
 import json
 import sqlite3
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -75,7 +75,7 @@ async def test_web_search_sqlite_cache_truncation_and_untrusted_framing(
     svc = WebSearchService(
         store=store, circuit_breaker=cb, settings=test_settings, provider=provider
     )
-    t0 = utc_now()
+    t0 = datetime(2026, 11, 22, 12, 0, 0, tzinfo=timezone.utc)
 
     # First call hits provider, truncates snippet, wraps in untrusted delimiters, increments daily count
     out1, is_err1 = await svc.search("  Python   3.13  release ", now=t0)
@@ -121,7 +121,7 @@ async def test_web_search_daily_quota_persists_and_blocks(
     svc = WebSearchService(
         store=store, circuit_breaker=cb, settings=test_settings, provider=provider
     )
-    t0 = utc_now()
+    t0 = datetime(2026, 11, 22, 12, 0, 0, tzinfo=timezone.utc)
 
     _, err1 = await svc.search("query one", now=t0)
     _, err2 = await svc.search("query two", now=t0)

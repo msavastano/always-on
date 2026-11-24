@@ -122,6 +122,20 @@ uv run always-on sleep
   # Or selectively:
   uv run always-on run --watch-claude-code --watch-vercel
   ```
+- **2-Way Discord Bot (Mobile/Desktop Chat + Proactive Alerts, Zero Tunnels):**
+  1. In the [Discord Developer Portal](https://discord.com/developers/applications), create an application/bot, enable **Message Content Intent** under *Bot*, and invite it to your private server (scopes: `bot`, `applications.commands`).
+  2. Add these to `.env`:
+     ```env
+     ENABLE_DISCORD_BOT=true
+     DISCORD_BOT_TOKEN=your_bot_token
+     DISCORD_ALLOWED_USER_IDS=your_numeric_discord_user_id
+     DISCORD_NOTIFY_CHANNEL_ID=your_numeric_channel_id
+     # Optional:
+     # DISCORD_GUILD_ID=your_server_id          # instant slash command sync (/status, /sleep, /memory, /correct)
+     # DISCORD_PASSIVE_CHANNEL_IDS=1234567890   # salience-gated channel (priority=normal)
+     # DISCORD_QUIET_HOURS=22:00-08:00          # suppresses non-critical proactive alerts overnight
+     ```
+  3. Run `uv run always-on run` (or pass `--discord`). Chat messages persist in SQLite (`chat_messages`), so Discord and the web dashboard share the same conversation history across restarts.
 - **File Watcher:** Drop or edit any text/markdown file inside `data/inbox/` — the daemon picks it up on the next 1s tick and scores it via zero-token local salience.
 - **Standalone Claude Code Release Watcher (Optional Separate Process):**
   Polls `anthropics/claude-code` GitHub Releases (with HTTP `ETag` `304` zero-quota caching + automatic `CHANGELOG.md` fallback) and POSTs new versions to `POST /api/events/webhook`:
@@ -156,6 +170,14 @@ uv run always-on sleep
     -d '{"content": "CI build failed on main branch", "actor_id": "github", "priority": "normal"}'
   ```
   *(Set `WEBHOOK_SECRET` in `.env` to require `X-Webhook-Secret` or `Authorization: Bearer` on webhook calls.)*
+- **External MCP Servers (GitHub, Calendar, Gmail, etc.):**
+  1. Copy `mcp_servers.example.json` to `mcp_servers.json` (git-ignored) and set `"enabled": true` on the servers you want.
+  2. Use `${VAR}` or `${VAR:-default}` placeholders in `args`, `env`, `url`, or `headers` to pull secrets cleanly from `.env` (e.g. `${GITHUB_TOKEN}`).
+  3. By default (`ALLOW_MCP_ON_BACKGROUND=false`), external MCP tools (`mcp__<server>__<tool>`) are exposed only on direct `chat` wake-ups unless a server explicitly sets `"allow_on_background": true`, and all remote outputs are wrapped in `<untrusted_mcp_content>` tags.
+  4. Verify your configuration before starting the daemon:
+     ```powershell
+     uv run always-on mcp
+     ```
 
 ---
 

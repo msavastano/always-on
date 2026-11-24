@@ -125,3 +125,23 @@ CREATE TABLE IF NOT EXISTS event_dedup (
 );
 
 CREATE INDEX IF NOT EXISTS idx_event_dedup_seen_at ON event_dedup(seen_at ASC);
+
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    role TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
+    actor_id TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'chat',
+    trigger_actor TEXT,
+    trigger_preview TEXT,
+    episode_id TEXT,
+    content TEXT NOT NULL,
+    thoughts TEXT NOT NULL DEFAULT '[]',
+    tool_calls TEXT NOT NULL DEFAULT '[]',
+    is_correction INTEGER NOT NULL DEFAULT 0 CHECK(is_correction IN (0, 1)),
+    salience REAL,
+    status TEXT NOT NULL DEFAULT 'ok',
+    usd_cost REAL NOT NULL DEFAULT 0.0
+);
+
+CREATE INDEX IF NOT EXISTS idx_chat_messages_id ON chat_messages(id DESC);

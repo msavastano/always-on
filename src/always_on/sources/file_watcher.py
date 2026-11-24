@@ -17,7 +17,7 @@ class FileWatcherSource(EventSource):
     name = "file_watcher"
 
     def __init__(self, inbox_dir: Path, *, max_preview_chars: int = 2000) -> None:
-        self.inbox_dir = inbox_dir
+        self.inbox_dir = inbox_dir.resolve()
         self.max_preview_chars = max_preview_chars
         self._known_hashes: dict[str, str] = {}
         self._initialized = False

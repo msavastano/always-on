@@ -1,0 +1,33 @@
+{
+  "mcpServers": {
+    "github": {
+      "enabled": false,
+      "transport": "streamable_http",
+      "url": "https://api.githubcopilot.com/mcp/",
+      "headers": {
+        "Authorization": "Bearer ${GITHUB_TOKEN}"
+      },
+      "allow_on_background": false
+    },
+    "google-calendar": {
+      "enabled": false,
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@cocal/google-calendar-mcp"],
+      "env": {
+        "GOOGLE_OAUTH_CREDENTIALS": "${GOOGLE_OAUTH_CREDENTIALS}"
+      },
+      "allow_on_background": false
+    },
+    "gmail": {
+      "enabled": false,
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@gongrzhe/server-gmail-autoauth-mcp"],
+      "env": {
+        "GMAIL_OAUTH_PATH": "${GOOGLE_OAUTH_CREDENTIALS}"
+      },
+      "allow_on_background": false
+    }
+  }
+}

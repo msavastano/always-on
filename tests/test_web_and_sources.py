@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import httpx
 import pytest
 
 from always_on.config import Settings
 from always_on.daemon import AlwaysOnDaemon
+from always_on.db.store import AgentStore
 from always_on.embeddings.provider import HashEmbeddingProvider
 from always_on.sources.file_watcher import FileWatcherSource
+from always_on.tools.registry import ToolRegistry
 from always_on.web.app import create_app
 from tests.conftest import FakeBlock, FakeMessage, make_mock_client
 
@@ -147,3 +150,83 @@ async def test_fastapi_chat_webhook_sleep_and_pin_endpoints(
             assert telem_after["fatigue"]["score"] == 0.0
     finally:
         await daemon.stop()
+
+
+@pytest.mark.asyncio
+async def test_notes_and_inbox_tools_work_with_relative_dirs_and_block_traversal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    test_settings: Settings,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    store = AgentStore(test_settings.db_path)
+    await store.connect()
+    try:
+        registry = ToolRegistry(
+            store=store,
+            inbox_dir=Path("data/inbox"),
+            notes_dir=Path("data/notes"),
+            settings=test_settings,
+        )
+
+        res1_txt, is_err1 = await registry.execute(
+            "write_note",
+            {"filename": "volleyball-practices.md", "content": "Wed 8pm"},
+        )
+        assert is_err1 is False
+        res1 = json.loads(res1_txt)
+        assert res1["status"] == "written"
+        assert res1["filename"] == "volleyball-practices.md"
+
+        res2_txt, is_err2 = await registry.execute(
+            "write_note",
+            {"filename": "family/nina.md", "content": "Practice"},
+        )
+        assert is_err2 is False
+        res2 = json.loads(res2_txt)
+        assert res2["status"] == "written"
+        assert res2["filename"] == "family/nina.md"
+
+        notes_txt, list_err = await registry.execute("list_notes", {})
+        assert list_err is False
+        assert json.loads(notes_txt)["notes"] == [
+            "family/nina.md",
+            "volleyball-practices.md",
+        ]
+
+        read1_txt, read1_err = await registry.execute(
+            "read_note", {"filename": "volleyball-practices.md"}
+        )
+        assert read1_err is False
+        assert read1_txt == "Wed 8pm"
+
+        read2_txt, read2_err = await registry.execute(
+            "read_note", {"filename": "family/nina.md"}
+        )
+        assert read2_err is False
+        assert read2_txt == "Practice"
+
+        (tmp_path / "data" / "inbox" / "schedule.txt").write_text(
+            "Gym at 6pm", encoding="utf-8"
+        )
+        inbox_list_txt, inbox_list_err = await registry.execute(
+            "list_inbox_files", {}
+        )
+        assert inbox_list_err is False
+        assert [f["filename"] for f in json.loads(inbox_list_txt)["files"]] == [
+            "schedule.txt"
+        ]
+        inbox_read_txt, inbox_read_err = await registry.execute(
+            "read_inbox_file", {"filename": "schedule.txt"}
+        )
+        assert inbox_read_err is False
+        assert inbox_read_txt == "Gym at 6pm"
+
+        esc_txt, esc_err = await registry.execute(
+            "write_note", {"filename": "../escape.md", "content": "nope"}
+        )
+        assert esc_err is True
+        assert "Path traversal blocked" in esc_txt
+        assert not (tmp_path / "data" / "escape.md").exists()
+    finally:
+        await store.close()

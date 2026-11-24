@@ -72,11 +72,13 @@ class FakeAnthropicSDK:
 @pytest.fixture
 def test_settings(tmp_path: Path) -> Settings:
     return Settings(
+        _env_file=None,
         anthropic_api_key="sk-ant-test-key",
         anthropic_model="claude-haiku-5-5",
         db_path=tmp_path / "test_agent.db",
         inbox_dir=tmp_path / "inbox",
         notes_dir=tmp_path / "notes",
+        mcp_config_path=tmp_path / "mcp_servers.json",
         embedding_provider="mock",
     )
 

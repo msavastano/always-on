@@ -12,6 +12,7 @@ build/
 
 # Environment & runtime state
 .env
+mcp_servers.json
 data/
 *.db
 *.db-wal

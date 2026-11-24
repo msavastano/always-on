@@ -908,6 +908,111 @@ class AgentStore:
             return False
 
     # -------------------------------------------------------------------------
+    # Persistent Chat Transcript (Shared across Dashboard, CLI & Discord)
+    # -------------------------------------------------------------------------
+
+    async def append_chat_message(self, entry: dict[str, Any]) -> dict[str, Any]:
+        """Persist a chat turn or proactive alert in SQLite and return copy with row ID."""
+        timestamp = str(entry.get("timestamp") or utc_now_iso())
+        role = str(entry["role"])
+        actor_id = str(entry.get("actor_id") or ("user" if role == "user" else "agent"))
+        source = str(entry.get("source") or "chat")
+        trigger_actor = entry.get("trigger_actor")
+        trigger_preview = entry.get("trigger_preview")
+        episode_id = entry.get("episode_id")
+        content = str(entry.get("content") or "")
+        thoughts = list(entry.get("thoughts") or [])
+        tool_calls = list(entry.get("tool_calls") or [])
+        is_correction = bool(entry.get("is_correction", False))
+        salience = entry.get("salience")
+        status = str(entry.get("status") or "ok")
+        usd_cost = float(entry.get("usd_cost") or 0.0)
+
+        async with self.transaction() as db:
+            cur = await db.execute(
+                """
+                INSERT INTO chat_messages (
+                    timestamp, role, actor_id, source, trigger_actor, trigger_preview,
+                    episode_id, content, thoughts, tool_calls, is_correction,
+                    salience, status, usd_cost
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    timestamp,
+                    role,
+                    actor_id,
+                    source,
+                    trigger_actor,
+                    trigger_preview,
+                    episode_id,
+                    content,
+                    json.dumps(thoughts),
+                    json.dumps(tool_calls),
+                    1 if is_correction else 0,
+                    salience,
+                    status,
+                    usd_cost,
+                ),
+            )
+            row_id = cur.lastrowid
+
+        saved = dict(entry)
+        saved["id"] = row_id
+        saved["timestamp"] = timestamp
+        return saved
+
+    async def list_chat_messages(self, limit: int = 100) -> list[dict[str, Any]]:
+        """Return the latest `limit` persisted chat messages oldest-first."""
+        async with self.conn.execute(
+            """
+            SELECT * FROM (
+                SELECT id, timestamp, role, actor_id, source, trigger_actor, trigger_preview,
+                       episode_id, content, thoughts, tool_calls, is_correction,
+                       salience, status, usd_cost
+                FROM chat_messages
+                ORDER BY id DESC
+                LIMIT ?
+            ) ORDER BY id ASC
+            """,
+            (max(1, int(limit)),),
+        ) as cur:
+            rows = await cur.fetchall()
+
+        result: list[dict[str, Any]] = []
+        for r in rows:
+            item: dict[str, Any] = {
+                "id": int(r["id"]),
+                "timestamp": str(r["timestamp"]),
+                "role": str(r["role"]),
+                "actor_id": str(r["actor_id"]),
+                "source": str(r["source"]),
+                "content": str(r["content"]),
+                "status": str(r["status"]),
+                "usd_cost": float(r["usd_cost"]),
+            }
+            if r["trigger_actor"] is not None:
+                item["trigger_actor"] = str(r["trigger_actor"])
+            if r["trigger_preview"] is not None:
+                item["trigger_preview"] = str(r["trigger_preview"])
+            if r["episode_id"] is not None:
+                item["episode_id"] = str(r["episode_id"])
+            if r["salience"] is not None:
+                item["salience"] = float(r["salience"])
+            if r["role"] == "user":
+                item["is_correction"] = bool(r["is_correction"])
+            else:
+                item["thoughts"] = json.loads(r["thoughts"])
+                item["tool_calls"] = json.loads(r["tool_calls"])
+            result.append(item)
+        return result
+
+    async def clear_chat_messages(self) -> int:
+        """Delete all rows from chat_messages without touching Core Memory or fast_buffer."""
+        async with self.transaction() as db:
+            cur = await db.execute("DELETE FROM chat_messages")
+            return int(cur.rowcount or 0)
+
+    # -------------------------------------------------------------------------
     # Internal row mappers
     # -------------------------------------------------------------------------
 
